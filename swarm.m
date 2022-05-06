@@ -4,23 +4,36 @@ f = figure();
 N = 50;
 x = 5*randn(1,N);
 y = 5*randn(1,N);
-v = 0.5*rand(1,N);
+V = 5; % velocity magnitude (all particles have the same velocity magnitude)
+v = 5*randn(N,2);
+for n=1:N
+    v(n,:) = v(n,:)./norm(v(n,:));
+end
 vnew = v;
-theta = 2*pi*randn(1,N);
-thetanew = theta;
-rneighbor = 1; % search radius for neighbors
+rneighbor = 0.5; % search radius for neighbors
 rsearch = 3;
+% weighting of velocity/cm favoritism based on neighbor location relative to
+% velocity vector direction
+vw_forward = 0.99;
+vw_90degrees = 0.1;
+cmw_forward = 0.9;
+cmw_90degrees = 0.7;
+vw_prod = vw_forward*vw_90degrees;
+cmw_prod = cmw_forward*cmw_90degrees;
+vweight_a = log((vw_forward-vw_prod)/(vw_90degrees-vw_prod));
+vweight_b = log((1-vw_90degrees)/vw_90degrees);
+cmweight_a = log((cmw_forward-cmw_prod)/(cmw_90degrees-cmw_prod));
+cmweight_b = log((1-cmw_90degrees)/cmw_90degrees);
 
-p = plot(NaN,NaN,'.','MarkerSize',6);
+p = quiver(x,y,0.1*v(:,1)',0.1*v(:,2)',0,'LineWidth',2.5);
 xrange = 20;
 yrange = 20;
 xlim([-xrange/2 xrange/2]);
 ylim([-yrange/2 yrange/2]);
-set(p, 'XDataSource', 'x', 'YDataSource', 'y');
 dt = 0.01;
 
 % parameters for storing particle locations
-search_grid_step = 0.2; % don't make too small for memory reasons
+search_grid_step = floor(sqrt(rneighbor*rsearch)); % don't make too small for memory reasons
 x_grid = int32(xrange/search_grid_step);
 y_grid = int32(yrange/search_grid_step);
 search_grid_contains_particle = cell(x_grid,y_grid); % list of particles in grid location
@@ -45,10 +58,10 @@ for n=1:N
     end
 end
 
-for i=1:10000
+for t=1:800
     % integrate position
-    xnew = x + (dt*v).*cos(theta);
-    ynew = y + (dt*v).*sin(theta);
+    xnew = x + (dt*v(:,1)');
+    ynew = y + (dt*v(:,2)');
     for n=1:N
         if xnew(n) >= xrange/2
             xnew(n) = xnew(n) - xrange;
@@ -110,46 +123,53 @@ for i=1:10000
                         np_loc = squeeze(search_grid_particle_locs(xg,yg,np,:))';
                         d = sum((np_loc - [x(n) y(n)]).^2);
                         if d <= r^2
-                            if ri == 1
-                                v_cart_neighbor(ri,:) = r^2/d*v_cart_neighbor(ri,:) + [v(np)*cos(theta(np)) v(np)*sin(theta(np))];
-                            else
-                                v_cart_neighbor(ri,:) = v_cart_neighbor(ri,:) + [v(np)*cos(theta(np)) v(np)*sin(theta(np))];
-                            end
-                            cm_neighbor(ri,:) = cm_neighbor(ri,:) + np_loc;
+                            % weight neighbors in front more strongly (i.e. follow the "leaders")
+                            v_dot_dx = dot(np_loc - [x(n) y(n)], v(n,:)/V);
+                            norm_dot = v_dot_dx/sqrt(d);
+                            v_weight = 1/(1+exp(-vweight_a*norm_dot+vweight_b));
+                            cm_weight = 1/(1+exp(-cmweight_a*norm_dot+cmweight_b));
+                            v_cart_neighbor(ri,:) = v_weight*v_cart_neighbor(ri,:) + v(np,:);
+                            cm_neighbor(ri,:) = cm_weight*cm_neighbor(ri,:) + np_loc;
                             num_neighbor(ri) = num_neighbor(ri) + 1;
                         end
                     end
                 end
             end
         end
-        v_cart = [v(n)*cos(theta(n)) v(n)*sin(theta(n))];
         if num_neighbor(1) > 0
             % nearby neighbors found -> match velocity vector
             d_cm = cm_neighbor(1,:)./num_neighbor(1) - [x(n) y(n)];
-            v_cart = v_cart_neighbor(1,:)./num_neighbor(1) + 0.01*d_cm;
-            vnew(n) = 0.001*v(n) + 0.999*norm(v_cart) + 0.5*randn;
-            d_theta = 0.1*randn;
+            v_neighbor = v_cart_neighbor(1,:)./num_neighbor(1);
+            v_urge = 0.1;
+            rand_urge = 0.01;
+            cm_urge = 0.1;
         elseif num_neighbor(2) > 0
             % further neighbors found -> flock to them
             d_cm = cm_neighbor(2,:)./num_neighbor(2) - [x(n) y(n)];
-            v_cart = 0.3*v_cart + 0.5*v_cart_neighbor(2,:) + 2*d_cm;
-            vnew(n) = norm(v_cart) + 0.5*randn;
-            d_theta = 0.5*randn;
+            v_neighbor = v_cart_neighbor(2,:)./num_neighbor(2);
+            v_urge = 0.2;
+            rand_urge = 0.05;
+            cm_urge = 0.5;
         else
             % just wander around; increase randomness of d_theta and d_vn
-            d_theta = 0.01*randn;
-            vnew(n) = v(n) + 0.02*randn;
+            d_cm = [0 0];
+            v_neighbor = [0 0];
+            rand_urge = 0.1;
+            v_urge = 0;
+            cm_urge = 0;
         end
-        R = [cos(d_theta) -sin(d_theta); sin(d_theta) cos(d_theta)];
-        v_cart = (R*v_cart')';
-        if abs(vnew(n)) > 10
-            vnew(n) = sign(vnew(n))*10;
-        end
-        thetanew(n) = angle(v_cart(1) + 1j*v_cart(2));
+        vnew(n,:) = v(n,:) + v_urge*v_neighbor + rand_urge*randn(1,2) + cm_urge*d_cm;
+        vnew(n,:) = V.*vnew(n,:)./norm(vnew(n,:));
     end
     v = vnew;
-    theta = thetanew;
     % update plot
+    set(p, 'xdata', x, 'ydata', y, 'udata', 0.8/V*v(:,1)', 'vdata', 0.8/V*v(:,2)');
     refreshdata(f,'caller');
     drawnow limitrate;
+    F(t) = getframe;
 end
+
+writerObj = VideoWriter('test2.avi');
+open(writerObj);
+writeVideo(writerObj, F);
+close(writerObj);
